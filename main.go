@@ -1,15 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"flag"
-	"io"
-	"log"
-	"mime"
-	"net"
+	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // ResponseWriter wraps the http.ResponseWriter.
@@ -32,112 +33,143 @@ func (w *ResponseWriter) Write(b []byte) (int, error) {
 }
 
 var (
-	dir    string
-	isFile bool
-	port   int
-	eth    string
+	path string
+	file string
+	port int
 )
 
 func init() {
-	mime.AddExtensionType(".go", "text/plain")
-
-	flag.StringVar(&dir, "d", "", "file or directory")
-	flag.StringVar(&eth, "i", "en0", "network interface")
+	flag.StringVar(&path, "f", "", "path or directory.")
 	flag.IntVar(&port, "p", 8000, "http server port")
 	flag.Parse()
 }
 
 func main() {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Println(err)
-			os.Exit(10)
-		}
-	}()
-	if len(dir) > 0 {
-		fi, err := os.Stat(dir)
-		if err != nil {
-			panic(err)
-		}
-		isFile = !fi.IsDir()
-	} else {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			panic(err)
-		}
+	if len(path) == 0 {
+		path, _ = os.Getwd()
 	}
-	addr := getIP() + ":" + strconv.Itoa(port)
-	log.Printf("=> start with http://%s at \"%s\".", addr, dir)
-	var handler http.Handler
-	if isFile {
-		handler = http.HandlerFunc(handleFile)
+	fi, err := os.Stat(path)
+	if err != nil {
+		exit(err)
+	}
+	if fi.IsDir() {
+		path, err = filepath.Abs(path)
+		file = "*"
 	} else {
-		handler = http.FileServer(http.Dir(dir))
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			exit(err)
+		}
+		path = filepath.Dir(abs)
+		file = filepath.Base(abs)
 	}
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		wrapper := &ResponseWriter{inner: w, status: 200}
-		handler.ServeHTTP(wrapper, r)
-		log.Printf("=> [%s] %s %d \"%s\"", r.RemoteAddr, r.RequestURI, wrapper.status, getHeader(r, "User-Agent", "-"))
+		pw := &ResponseWriter{w, 200}
+		defer func() {
+			ip := r.RemoteAddr
+			if strings.Contains(ip, ":") {
+				ip = strings.Split(ip, ":")[0]
+			}
+			log(strings.Join([]string{"[" + ip + "]", strconv.Itoa(pw.status), r.RequestURI}, " "))
+		}()
+		serve(pw, r)
 	})
-	panic(http.ListenAndServe(":8000", nil))
-}
-
-func getHeader(r *http.Request, key string, defs ...string) string {
-	value := r.Header.Get(key)
-	if len(value) == 0 && len(defs) > 0 {
-		value = defs[0]
-	}
-	return value
-}
-
-func getIP() string {
-	interfaces, err := net.Interfaces()
+	addr := "0.0.0.0:" + strconv.Itoa(port)
+	log("listen on addr %s.", addr)
+	err = http.ListenAndServe(addr, nil)
 	if err != nil {
-		panic(err)
+		exit(err)
 	}
+}
 
-	for _, intf := range interfaces {
-		if intf.Name == eth {
-			addrs, err := intf.Addrs()
-			if err != nil {
-				panic(err)
-			}
-			for _, addr := range addrs {
-				if ipAddr, ok := addr.(*net.IPNet); ok {
-					if ip := ipAddr.IP.To4(); ip != nil {
-						return ip.String()
-					}
-				}
-			}
+func serve(w http.ResponseWriter, r *http.Request) {
+	log(r.RequestURI)
+	if r.RequestURI != "/" {
+		if file != "*" && strings.Trim(r.RequestURI, "/") != file {
+			http.NotFound(w, r)
+			return
 		}
 	}
-	return "0.0.0.0"
+	query := filepath.Join(path, r.RequestURI)
+	fi, err := os.Stat(query)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		log("fail to stat file %s: %s.", query, err.Error())
+		internalServerError(w)
+		return
+	}
+	if fi.IsDir() {
+		var files []string
+		if file == "*" {
+			fis, err := ioutil.ReadDir(query)
+			if err != nil {
+				internalServerError(w)
+				return
+			}
+			for _, fi := range fis {
+				files = append(files, fi.Name())
+			}
+		} else {
+			files = append(files, file)
+		}
+		err := listFiles(w, r, files)
+		if err != nil {
+			log("fail to list files %s: %s.", query, err.Error())
+		}
+	} else {
+		f, err := os.Open(query)
+		if err != nil {
+			log("fail to open file %s: %s.", query, err.Error())
+			internalServerError(w)
+			return
+		}
+		http.ServeContent(w, r, "foo", fi.ModTime(), f)
+		err = f.Close()
+		if err != nil {
+			log("fail to close %s: %s.", query, err.Error())
+		}
+	}
 }
 
-func handleFile(w http.ResponseWriter, r *http.Request) {
-	// redirect to the filename based uri.
-	filename := filepath.Base(dir)
-	if "/"+filename != r.URL.Path {
-		w.Header().Set("Location", "/"+filename)
-		w.WriteHeader(302)
-		return
+func exit(msg interface{}) {
+	fmt.Fprintln(os.Stderr, msg)
+	os.Exit(10)
+}
+
+func log(format string, a ...interface{}) {
+	if !strings.HasSuffix(format, "\n") {
+		format += "\n"
 	}
-	file, err := os.Open(dir)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
+	format = time.Now().Format("2006.01.02 15:04:05 ") + format
+	fmt.Fprintf(os.Stderr, format, a...)
+}
+
+func internalServerError(w http.ResponseWriter) {
+	http.Error(w, "internal server error.", 500)
+}
+
+func listFiles(w http.ResponseWriter, r *http.Request, files []string) error {
+	html := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>%s</title>
+</head>
+<body>
+<h1>Index of %s</h1>
+<hr>
+<p>
+%s
+</p>
+</body>
+</html>`
+	buf := new(bytes.Buffer)
+	for _, file := range files {
+		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a><br>", filepath.Join(r.RequestURI, file), file))
 	}
-	defer file.Close()
-	contentType := mime.TypeByExtension(filepath.Ext(dir))
-	if len(contentType) > 0 {
-		w.Header().Set("Content-Type", contentType)
-	} else {
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+filepath.Base(dir)+"\"")
-	}
-	_, err = io.Copy(w, file)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
+	_, err := w.Write([]byte(fmt.Sprintf(html, r.RequestURI, r.RequestURI, buf.String())))
+	return err
 }
