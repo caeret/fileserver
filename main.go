@@ -83,7 +83,6 @@ func main() {
 }
 
 func serve(w http.ResponseWriter, r *http.Request) {
-	log(r.RequestURI)
 	if r.RequestURI != "/" {
 		if file != "*" && strings.Trim(r.RequestURI, "/") != file {
 			http.NotFound(w, r)
