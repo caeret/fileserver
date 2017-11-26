@@ -70,7 +70,7 @@ func main() {
 			if strings.Contains(ip, ":") {
 				ip = strings.Split(ip, ":")[0]
 			}
-			log(strings.Join([]string{"[" + ip + "]", strconv.Itoa(pw.status), r.RequestURI}, " "))
+			log(strings.Join([]string{"[" + ip + "]", strconv.Itoa(pw.status), r.URL.Path}, " "))
 		}()
 		serve(pw, r)
 	})
@@ -83,13 +83,13 @@ func main() {
 }
 
 func serve(w http.ResponseWriter, r *http.Request) {
-	if r.RequestURI != "/" {
-		if file != "*" && strings.Trim(r.RequestURI, "/") != file {
+	if r.URL.Path != "/" {
+		if file != "*" && strings.Trim(r.URL.Path, "/") != file {
 			http.NotFound(w, r)
 			return
 		}
 	}
-	query := filepath.Join(path, r.RequestURI)
+	query := filepath.Join(path, r.URL.Path)
 	fi, err := os.Stat(query)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -167,8 +167,8 @@ func listFiles(w http.ResponseWriter, r *http.Request, files []string) error {
 </html>`
 	buf := new(bytes.Buffer)
 	for _, file := range files {
-		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a><br>", filepath.Join(r.RequestURI, file), file))
+		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a><br>", filepath.Join(r.URL.Path, file), file))
 	}
-	_, err := w.Write([]byte(fmt.Sprintf(html, r.RequestURI, r.RequestURI, buf.String())))
+	_, err := w.Write([]byte(fmt.Sprintf(html, r.URL.Path, r.URL.Path, buf.String())))
 	return err
 }
