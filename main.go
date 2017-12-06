@@ -33,34 +33,34 @@ func (w *ResponseWriter) Write(b []byte) (int, error) {
 }
 
 var (
-	path string
+	root string
 	file string
 	port int
 )
 
 func init() {
-	flag.StringVar(&path, "f", "", "path or directory.")
+	flag.StringVar(&root, "f", "", "root directory or a file allowed to be visited.")
 	flag.IntVar(&port, "p", 8000, "http server port")
 	flag.Parse()
 }
 
 func main() {
-	if len(path) == 0 {
-		path, _ = os.Getwd()
+	if len(root) == 0 {
+		root, _ = os.Getwd()
 	}
-	fi, err := os.Stat(path)
+	fi, err := os.Stat(root)
 	if err != nil {
 		exit(err)
 	}
 	if fi.IsDir() {
-		path, err = filepath.Abs(path)
+		root, err = filepath.Abs(root)
 		file = "*"
 	} else {
-		abs, err := filepath.Abs(path)
+		abs, err := filepath.Abs(root)
 		if err != nil {
 			exit(err)
 		}
-		path = filepath.Dir(abs)
+		root = filepath.Dir(abs)
 		file = filepath.Base(abs)
 	}
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -83,13 +83,15 @@ func main() {
 }
 
 func serve(w http.ResponseWriter, r *http.Request) {
+	// 根目录必然允许访问
 	if r.URL.Path != "/" {
+		// 如果 file 是 *，则代表可以访问根目录下所有文件。否则，只能访问根目录下某个文件
 		if file != "*" && strings.Trim(r.URL.Path, "/") != file {
 			http.NotFound(w, r)
 			return
 		}
 	}
-	query := filepath.Join(path, r.URL.Path)
+	query := filepath.Join(root, r.URL.Path)
 	fi, err := os.Stat(query)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -103,6 +105,9 @@ func serve(w http.ResponseWriter, r *http.Request) {
 	if fi.IsDir() {
 		var files []string
 		if file == "*" {
+			if r.URL.Path != "/" {
+				files = append(files, "..")
+			}
 			fis, err := ioutil.ReadDir(query)
 			if err != nil {
 				internalServerError(w)
@@ -161,13 +166,12 @@ func listFiles(w http.ResponseWriter, r *http.Request, files []string) error {
 <h1>Index of %s</h1>
 <hr>
 <p>
-%s
-</p>
+%s</p>
 </body>
 </html>`
 	buf := new(bytes.Buffer)
 	for _, file := range files {
-		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a><br>", filepath.Join(r.URL.Path, file), file))
+		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a><br>\n", filepath.Join(r.URL.Path, file), file))
 	}
 	_, err := w.Write([]byte(fmt.Sprintf(html, r.URL.Path, r.URL.Path, buf.String())))
 	return err
