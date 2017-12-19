@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,36 +34,30 @@ func (w *ResponseWriter) Write(b []byte) (int, error) {
 }
 
 var (
-	root string
-	file string
-	port int
+	root  string
+	file  string
+	netIF string
+	port  int
 )
 
 func init() {
 	flag.StringVar(&root, "f", "", "root directory or a file allowed to be visited.")
 	flag.IntVar(&port, "p", 8000, "http server port")
+	flag.StringVar(&netIF, "i", "", "net interface")
 	flag.Parse()
 }
 
 func main() {
-	if len(root) == 0 {
-		root, _ = os.Getwd()
-	}
-	fi, err := os.Stat(root)
+	err := resolvePath()
 	if err != nil {
 		exit(err)
 	}
-	if fi.IsDir() {
-		root, err = filepath.Abs(root)
-		file = "*"
-	} else {
-		abs, err := filepath.Abs(root)
-		if err != nil {
-			exit(err)
-		}
-		root = filepath.Dir(abs)
-		file = filepath.Base(abs)
+
+	ip, err := resolveInterface()
+	if err != nil {
+		exit(err)
 	}
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		pw := &ResponseWriter{w, 200}
 		defer func() {
@@ -74,8 +69,8 @@ func main() {
 		}()
 		serve(pw, r)
 	})
-	addr := "0.0.0.0:" + strconv.Itoa(port)
-	log("listen on addr %s.", addr)
+	addr := ip + ":" + strconv.Itoa(port)
+	log("serveing on http://%s.", addr)
 	err = http.ListenAndServe(addr, nil)
 	if err != nil {
 		exit(err)
@@ -136,6 +131,60 @@ func serve(w http.ResponseWriter, r *http.Request) {
 			log("fail to close %s: %s.", query, err.Error())
 		}
 	}
+}
+
+func resolvePath() error {
+	if len(root) == 0 {
+		root, _ = os.Getwd()
+	}
+	fi, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		root, err = filepath.Abs(root)
+		file = "*"
+	} else {
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return err
+		}
+		root = filepath.Dir(abs)
+		file = filepath.Base(abs)
+	}
+	return nil
+}
+
+func resolveInterface() (string, error) {
+	var (
+		n   *net.Interface
+		err error
+	)
+	if len(netIF) > 0 {
+		n, err = net.InterfaceByName(netIF)
+	} else {
+		n, err = net.InterfaceByIndex(1)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	addrs, err := n.Addrs()
+	if err != nil {
+		return "", err
+	}
+
+	for _, addr := range addrs {
+		switch v := addr.(type) {
+		case *net.IPNet:
+			if v.IP.To4() != nil {
+				log("choosing interface: %s.", n.Name)
+				return v.IP.String(), nil
+			}
+		default:
+		}
+	}
+	return "", net.InvalidAddrError("fail to find addr")
 }
 
 func exit(msg interface{}) {
